@@ -1,76 +1,88 @@
-use std::env;
 use std::fs::File;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
+use std::{env, path::Path};
 
-use image::{GenericImageView, Rgba};
+use image::Rgb;
+use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSliceMut;
+
+const CHUNK: usize = 1024;
+const PIXEL_SIZE: usize = 4;
 
 fn main() {
     // Get command line arguments
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: {} <colors> <image>", args[0]);
+    let mut args = env::args();
+    // SAFETY: This unwrap cannot fail as it captures the first argument, which is always the path
+    // to the binary
+    let binary_name = args.next().unwrap();
+
+    let [Some(colors_file), Some(image_file)] = std::array::from_fn(|_| args.next()) else {
+        eprintln!("Usage: {binary_name} <colors> <image>");
         return;
-    }
+    };
 
-    let colors_file = &args[1];
-    let image_file = &args[2];
+    let palette: Vec<_> = parse_colors(colors_file).collect();
+    let img = image::open(&image_file)
+        .unwrap_or_else(|_| panic!("Failed to open image file: {}", image_file));
+    let mut img = img.into_rgba8();
 
-    let palette = parse_colors(colors_file);
-    let img = image::open(image_file).expect(format!("Failed to open image file: {}", image_file).as_str());
-
-    // Create a new image the same size as the file
-    let (width, height) = img.dimensions();
-    let mut new_img = image::RgbaImage::new(width, height);
-
-    for pixel in img.pixels() {
-        let x = pixel.0;
-        let y = pixel.1;
-        let pixel_color = pixel.2;
-
-        // Find which color in the list is closest to the pixel color
-        let mut closest_color = None;
-        let mut closest_diff = f64::MAX;
-        for color in &palette {
-            let diff_value = diff(pixel_color, *color);
-            if diff_value < closest_diff {
-                closest_diff = diff_value;
-                closest_color = Some(color.clone());
-            }
-        }
-        if let Some(closest_color) = closest_color {
-            new_img.put_pixel(x, y, closest_color);
-        }
-
-    }
+    img.par_chunks_mut(CHUNK * PIXEL_SIZE).for_each(|chunk| {
+        chunk.chunks_exact_mut(PIXEL_SIZE).for_each(|pixel| {
+            let pixel: &mut [u8; 3] = &mut pixel[..3].try_into().unwrap();
+            let p = Rgb([pixel[0], pixel[1], pixel[2]]);
+            let (closest_color, _) = palette.iter().copied().fold(
+                (Rgb([0; 3]), f32::MAX),
+                |(old_color, distance), color| {
+                    let new_dist = diff(p, color);
+                    if new_dist < distance {
+                        (color, new_dist)
+                    } else {
+                        (old_color, distance)
+                    }
+                },
+            );
+            let closest_color = closest_color.0;
+            *pixel = closest_color;
+        });
+    });
 
     // Save the new image
-    new_img.save("output.png").expect("Failed to save image");
+    img.save("output.png").expect("Failed to save image");
 }
 
-fn diff(a: Rgba<u8>, b: Rgba<u8>) -> f64 {
-    let r_diff = (a[0] as i32 - b[0] as i32).abs() as u32;
-    let g_diff = (a[1] as i32 - b[1] as i32).abs() as u32;
-    let b_diff = (a[2] as i32 - b[2] as i32).abs() as u32;
+fn diff(Rgb(a): Rgb<u8>, Rgb(b): Rgb<u8>) -> f32 {
+    let diff = |idx| i32::abs_diff(a[idx] as i32, b[idx] as i32);
+    let r_diff = diff(0);
+    let g_diff = diff(1);
+    let b_diff = diff(2);
 
-    f64::sqrt((r_diff * r_diff + g_diff * g_diff + b_diff * b_diff) as f64)
+    f32::sqrt((r_diff * r_diff + g_diff * g_diff + b_diff * b_diff) as f32)
 }
 
-fn from_str(hex_code: &str) -> Result<image::Rgba<u8>, std::num::ParseIntError> {
+fn from_str(hex_code: &str) -> Result<image::Rgb<u8>, std::num::ParseIntError> {
     // u8::from_str_radix(src: &str, radix: u32) converts a string
     // slice in a given base to u8
     let r: u8 = u8::from_str_radix(&hex_code[1..3], 16)?;
     let g: u8 = u8::from_str_radix(&hex_code[3..5], 16)?;
     let b: u8 = u8::from_str_radix(&hex_code[5..7], 16)?;
 
-    Ok(image::Rgba([r, g, b, 255]))
+    Ok(image::Rgb([r, g, b]))
 }
 
-fn parse_colors(file: &str) -> Vec<Rgba<u8>> {
-    let mut colors = Vec::new();
-    let file = File::open(file).expect(format!("Failed to open colors file: {}", file).as_str());
-    for line in std::io::BufReader::new(file).lines() {
+fn parse_colors(file: impl AsRef<Path>) -> impl Iterator<Item = Rgb<u8>> {
+    let file = file.as_ref();
+    let file = match File::open(file) {
+        Ok(file) => file,
+        Err(err) => {
+            panic!("Failed to open colors file at path {file:?} with error {err}")
+        }
+    };
+    let file = BufReader::new(file);
+    file.lines().map(|line| {
         let line = line.expect("Failed to read line");
-        colors.push(from_str(&line).expect(format!("Failed to parse color: {}", line).as_str()));
-    }
-    colors
+        match from_str(&line) {
+            Ok(color) => color,
+            Err(err) => panic!("Failed to parse color: {}, {err}", line),
+        }
+    })
 }
