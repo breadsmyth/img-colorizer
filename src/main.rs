@@ -30,11 +30,17 @@ fn main() {
         chunk.chunks_exact_mut(PIXEL_SIZE).for_each(|pixel| {
             let pixel: &mut [u8; 3] = &mut pixel[..3].try_into().unwrap();
             let p = Rgb([pixel[0], pixel[1], pixel[2]]);
-            let closest_color = palette
-                .iter()
-                .copied()
-                .min_by(|&a, &b| diff(p, a).total_cmp(&diff(p, b)))
-                .unwrap();
+            let (closest_color, _) = palette.iter().copied().fold(
+                (Rgb([0; 3]), f32::MAX),
+                |(old_color, distance), color| {
+                    let new_dist = diff(p, color);
+                    if new_dist < distance {
+                        (color, new_dist)
+                    } else {
+                        (old_color, distance)
+                    }
+                },
+            );
             let closest_color = closest_color.0;
             *pixel = closest_color;
         });
