@@ -2,7 +2,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::{env, path::Path};
 
-use image::Rgba;
+use image::Rgb;
+use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSliceMut;
+
+const CHUNK: usize = 1024;
+const PIXEL_SIZE: usize = 4;
 
 fn main() {
     // Get command line arguments
@@ -21,25 +26,25 @@ fn main() {
         .unwrap_or_else(|_| panic!("Failed to open image file: {}", image_file));
     let mut img = img.into_rgba8();
 
-    for pixel in img.pixels_mut() {
-        // Find which color in the list is closest to the pixel color
-        let mut closest_color = Rgba([0; 4]);
-        let mut closest_diff = f32::MAX;
-        for &color in &palette {
-            let diff_value = diff(*pixel, color);
-            if diff_value < closest_diff {
-                closest_diff = diff_value;
-                closest_color = color;
-            }
-        }
-        *pixel = closest_color;
-    }
+    img.par_chunks_mut(CHUNK * PIXEL_SIZE).for_each(|chunk| {
+        chunk.chunks_exact_mut(PIXEL_SIZE).for_each(|pixel| {
+            let pixel: &mut [u8; 3] = &mut pixel[..3].try_into().unwrap();
+            let p = Rgb([pixel[0], pixel[1], pixel[2]]);
+            let closest_color = palette
+                .iter()
+                .copied()
+                .min_by(|&a, &b| diff(p, a).total_cmp(&diff(p, b)))
+                .unwrap();
+            let closest_color = closest_color.0;
+            *pixel = closest_color;
+        });
+    });
 
     // Save the new image
     img.save("output.png").expect("Failed to save image");
 }
 
-fn diff(Rgba(a): Rgba<u8>, Rgba(b): Rgba<u8>) -> f32 {
+fn diff(Rgb(a): Rgb<u8>, Rgb(b): Rgb<u8>) -> f32 {
     let diff = |idx| i32::abs_diff(a[idx] as i32, b[idx] as i32);
     let r_diff = diff(0);
     let g_diff = diff(1);
@@ -48,17 +53,17 @@ fn diff(Rgba(a): Rgba<u8>, Rgba(b): Rgba<u8>) -> f32 {
     f32::sqrt((r_diff * r_diff + g_diff * g_diff + b_diff * b_diff) as f32)
 }
 
-fn from_str(hex_code: &str) -> Result<image::Rgba<u8>, std::num::ParseIntError> {
+fn from_str(hex_code: &str) -> Result<image::Rgb<u8>, std::num::ParseIntError> {
     // u8::from_str_radix(src: &str, radix: u32) converts a string
     // slice in a given base to u8
     let r: u8 = u8::from_str_radix(&hex_code[1..3], 16)?;
     let g: u8 = u8::from_str_radix(&hex_code[3..5], 16)?;
     let b: u8 = u8::from_str_radix(&hex_code[5..7], 16)?;
 
-    Ok(image::Rgba([r, g, b, 255]))
+    Ok(image::Rgb([r, g, b]))
 }
 
-fn parse_colors(file: impl AsRef<Path>) -> impl Iterator<Item = Rgba<u8>> {
+fn parse_colors(file: impl AsRef<Path>) -> impl Iterator<Item = Rgb<u8>> {
     let file = file.as_ref();
     let file = match File::open(file) {
         Ok(file) => file,
